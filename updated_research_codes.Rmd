@@ -1,0 +1,649 @@
+---
+title: A Methodological Comparison of Penalized Regression and Recursive Feature Elimination
+  for Predictive Modeling
+output:
+  word_document: default
+  pdf_document: default
+---
+
+
+```{r}
+
+#--------------------------------------------------------------------------------------#
+# title: "Comparison between Penalised Regression and Recursive Feature elimination"
+# author: "Improved and Enhanced for Publication"
+#--------------------------------------------------------------------------------------#
+
+# --- 1. SETUP: LOAD ALL LIBRARIES ---
+# NOTE: Consolidated all library calls to the beginning for clarity.
+if (!require("mlbench")) install.packages("mlbench")
+if (!require("knitr")) install.packages("knitr")
+if (!require("dlookr")) install.packages("dlookr")
+if (!require("e1071")) install.packages("e1071")
+if (!require("corrplot")) install.packages("corrplot")
+if (!require("caret")) install.packages("caret")
+if (!require("lmtest")) install.packages("lmtest")
+if (!require("car")) install.packages("car")
+if (!require("glmnet")) install.packages("glmnet")
+if (!require("rpart")) install.packages("rpart")
+if (!require("ipred")) install.packages("ipred")
+if (!require("randomForest")) install.packages("randomForest")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("tidyr")) install.packages("tidyr")
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("flextable")) install.packages("flextable")
+# Libraries for advanced visualizations
+if (!require("ggResidpanel")) install.packages("ggResidpanel")
+if (!require("boot")) install.packages("boot")
+if (!require("vip")) install.packages("vip")
+if (!require("pdp")) install.packages("pdp")
+if (!require("iml")) install.packages("iml")
+
+
+library(mlbench)
+library(knitr)
+library(dlookr)
+library(e1071)
+library(corrplot)
+library(caret)
+library(lmtest)
+library(car)
+library(glmnet)
+library(rpart)
+library(ipred)
+library(randomForest)
+library(ggplot2)
+library(tidyr)
+library(dplyr)
+library(flextable)
+library(ggResidpanel)
+library(boot)
+library(vip)
+library(pdp)
+library(iml)
+
+
+```
+
+
+
+```{r}
+
+# --- 2. DATA LOADING AND INITIAL CLEANING ---
+# Load the BostonHousing dataset
+data("BostonHousing", package = "mlbench")
+boston_df <- BostonHousing
+
+# Remove censored observations (where the median value is capped at 50)
+boston_df <- boston_df[boston_df$medv < 50.0, ]
+
+# Remove the ethically problematic 'b' variable
+boston_df$b <- NULL
+print("The 'b' variable has been removed from the dataset.")
+
+# Check for any missing values
+if (sum(is.na(boston_df)) == 0) {
+  print("No missing values found.")
+}
+
+```
+
+
+
+```{r}
+
+# --- 3. EXPLORATORY DATA ANALYSIS (EDA) ---
+# NOTE: The original EDA plotting code for histograms, boxplots, and correlations is
+# functionally correct and has been kept as is. It runs without issues.
+# SUGGESTION: In your paper, use the correlation plot to explicitly justify
+# the need for penalized regression, as high multicollinearity (e.g., between RAD and TAX)
+# is a key problem these methods are designed to solve.
+correlation_matrix <- cor(boston_df[, sapply(boston_df, is.numeric)])
+corrplot(correlation_matrix)
+
+
+```
+
+
+
+
+```{r}
+
+# --- 4. DATA PREPROCESSING AND SPLITTING ---
+# Apply log1p transformation to skewed features to normalize their distributions
+numeric_vars <- boston_df[, sapply(boston_df, is.numeric)]
+predictors <- numeric_vars[, -which(names(numeric_vars) == "medv")]
+skewness_values <- apply(predictors, 2, skewness)
+skewed_features <- names(skewness_values[abs(skewness_values) > 0.75])
+for (col in skewed_features) {
+  boston_df[[col]] <- log1p(boston_df[[col]])
+}
+print(paste("Applied log transformation to:", paste(skewed_features, collapse=", ")))
+
+# Set seed for reproducibility of the data split
+set.seed(123)
+# Create a stratified split to maintain the distribution of 'medv' in both sets
+train_index <- createDataPartition(boston_df$medv, p = 0.8, list = FALSE)
+train_data <- boston_df[train_index, ]
+test_data <- boston_df[-train_index, ]
+
+# --- 4A. SCALING THE DATA ---
+# Centralized the scaling logic. All subsequent models will use these scaled datasets.
+# This ensures a consistent basis for model comparison.
+
+# Separate predictors (X) and outcome (y) from the unscaled data
+y_train <- train_data$medv
+x_train_unscaled <- train_data[,!(names(train_data) %in% c("medv"))]
+y_test <- test_data$medv
+x_test_unscaled <- test_data[,!(names(test_data) %in% c("medv"))]
+
+# Create a scaling object using ONLY the training data to avoid data leakage
+preprocess_params <- preProcess(x_train_unscaled, method = c("center", "scale"))
+
+# Apply the scaling to both training and test sets
+x_train_final <- predict(preprocess_params, x_train_unscaled)
+x_test_final <- predict(preprocess_params, x_test_unscaled)
+
+# Create matrix versions of the scaled data for the 'glmnet' package, which requires matrix input
+x_train_matrix <- as.matrix(x_train_final)
+x_test_matrix <- as.matrix(x_test_final)
+
+
+
+```
+
+
+
+```{r}
+
+# --- 5. MODEL TRAINING ---
+
+## --- 5A. BASELINE AND PENALIZED REGRESSION MODELS ---
+
+# 1. Ordinary Least Squares (OLS)
+ols_model <- lm(medv ~., data = train_data)
+ols_model$coefficients
+
+# 2. Ridge Regression (alpha = 0)
+set.seed(123)
+cv_ridge <- cv.glmnet(x_train_matrix, y_train, alpha = 0)
+best_lambda_ridge <- cv_ridge$lambda.min
+ridge_model <- glmnet(x_train_matrix, y_train, alpha = 0, lambda = best_lambda_ridge)
+plot(cv_ridge)
+# 3. Lasso Regression (alpha = 1)
+set.seed(123)
+cv_lasso <- cv.glmnet(x_train_matrix, y_train, alpha = 1)
+best_lambda_lasso <- cv_lasso$lambda.min
+lasso_model <- glmnet(x_train_matrix, y_train, alpha = 1, lambda = best_lambda_lasso)
+plot(cv_lasso)
+# 4. Adaptive Lasso
+ridge_coeffs_for_weights <- as.matrix(coef(ridge_model))
+weights <- 1 / abs(ridge_coeffs_for_weights[-1, 1]) # Exclude intercept
+set.seed(123)
+cv_adalasso <- cv.glmnet(x_train_matrix, y_train, alpha = 1, penalty.factor = weights)
+best_lambda_adalasso <- cv_adalasso$lambda.min
+adalasso_model <- glmnet(x_train_matrix, y_train, alpha = 1, lambda = best_lambda_adalasso, penalty.factor = weights)
+plot(cv_adalasso)
+# 5. Elastic-Net (caret)
+set.seed(123)
+elastic_net_model <- train(
+  x = x_train_final,
+  y = y_train,
+  method = "glmnet",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+
+library(car)
+vif(ols_model)
+
+```
+
+
+
+```{r}
+
+# 7. RFE with Decision Tree core
+set.seed(123)
+rfe_dt_results <- rfe(
+  x = x_train_final, y = y_train,
+  sizes = 2:ncol(x_train_final),
+  rfeControl = rfeControl(functions = treebagFuncs, method = "cv", number = 10)
+  )
+
+# 8. RFE with Random Forest core
+set.seed(123)
+rfe_rf_results <- rfe(
+  x = x_train_final, y = y_train,
+  sizes = 2:ncol(x_train_final),
+  rfeControl = rfeControl(functions = rfFuncs, method = "cv", number = 10)
+)
+
+# 9. RFE with Elastic Net core
+set.seed(123)
+rfe_glmnet <- rfe(
+  x = x_train_final, y = y_train,
+  sizes = 2:ncol(x_train_final),
+  rfeControl = rfeControl(functions = caretFuncs, method = "cv", number = 5),
+  method = "glmnet",
+  metric = "RMSE"
+)
+
+# 10. RFE with Adaptive Lasso core
+
+adaLassoFuncs <- caretFuncs
+adaLassoFuncs$rank <- function(object, x, y) {
+  cv_ridge <- cv.glmnet(x_train_matrix, y_train, alpha = 0)
+best_lambda_ridge <- cv_ridge$lambda.min
+ ridge_fit=glmnet(x_train_matrix, y_train, alpha = 0, lambda = best_lambda_ridge)
+  initial_coefs <- as.numeric(coef(ridge_fit, s = 0.01)[-1])
+  weights <- 1 / (abs(initial_coefs) +.Machine$double.eps)
+  ada_lasso_fit <- glmnet(as.matrix(x), y, alpha = 1, penalty.factor = weights)
+  final_coefs <- as.numeric(coef(ada_lasso_fit, s = min(ada_lasso_fit$lambda))[-1])
+  var_imp <- abs(final_coefs)
+  imp_df <- data.frame(var = colnames(x), Overall = var_imp)
+  imp_df <- imp_df
+  return(imp_df)
+}
+set.seed(123)
+rfe_adalasso <- rfe(
+  x = x_train_final, y = y_train,
+  sizes = 2:ncol(x_train_final),
+  rfeControl = rfeControl(functions = adaLassoFuncs, method = "cv", number = 5),
+  method = "glmnet",
+  metric = "RMSE"
+)
+
+
+```
+
+
+
+```{r}
+
+# --- 6. PERFORMANCE EVALUATION ON TEST SET ---
+# Helper function to calculate Adjusted R-squared
+get_adj_r2 <- function(preds, actual, n, p) {
+  rss <- sum((actual - preds)^2)
+  tss <- sum((actual - mean(actual))^2)
+  r2 <- 1 - (rss / tss)
+  if (n - p - 1 <= 0) return(NA) # Avoid division by zero
+  adj_r2 <- 1 - ((1 - r2) * (n - 1) / (n - p - 1))
+  return(adj_r2)
+}
+
+# Create a list to hold the results
+model_results <- list()
+n_test <- length(y_test)
+
+# 1. OLS
+preds <- predict(ols_model, newdata = test_data)
+p <- length(coef(ols_model)) - 1
+model_results[["OLS"]] <- c(RMSE = RMSE(preds, y_test), AdjR2 = get_adj_r2(preds, y_test, n_test, p), Features = p)
+
+# 2. Ridge
+preds <- predict(ridge_model, newx = x_test_matrix)
+p <- ncol(x_test_matrix)
+model_results[["Ridge"]] <- c(RMSE = RMSE(preds, y_test), AdjR2 = get_adj_r2(preds, y_test, n_test, p), Features = p)
+
+# 3. Lasso
+preds <- predict(lasso_model, newx = x_test_matrix)
+p <- sum(coef(lasso_model) != 0) - 1
+model_results[["Lasso"]] <- c(RMSE = RMSE(preds, y_test), AdjR2 = get_adj_r2(preds, y_test, n_test, p), Features = p)
+
+# 4. Adaptive Lasso
+preds_adalasso <- predict(adalasso_model, newx = x_test_matrix)
+p_adalasso <- sum(coef(adalasso_model)!= 0) - 1
+model_results[["Adaptive Lasso"]] <- c(RMSE = RMSE(preds_adalasso, y_test), AdjR2 = get_adj_r2(preds_adalasso, y_test, n_test, p_adalasso), Features = p_adalasso)
+
+# 5. Elastic-Net
+preds_enet <- predict(elastic_net_model, newdata = x_test_final)
+p_enet <- sum(coef(elastic_net_model$finalModel, elastic_net_model$bestTune$lambda)!= 0) - 1
+model_results[["Elastic-Net"]] <- c(RMSE = RMSE(preds_enet, y_test), AdjR2 = get_adj_r2(preds_enet, y_test, n_test, p_enet), Features = p_enet)
+
+# 6. RFE-DT
+preds_rfe_dt <- predict(rfe_dt_results, newdata = x_test_final)
+p_rfe_dt <- length(predictors(rfe_dt_results))
+model_results[["RFE-DT"]] <- c(RMSE = RMSE(preds_rfe_dt, y_test), AdjR2 = get_adj_r2(preds_rfe_dt, y_test, n_test, p_rfe_dt), Features = p_rfe_dt)
+
+# 7. RFE-RF
+preds_rfe_rf <- predict(rfe_rf_results, newdata = x_test_final)
+p_rfe_rf <- length(predictors(rfe_rf_results))
+model_results[["RFE-RF"]] <- c(RMSE = RMSE(preds_rfe_rf, y_test), AdjR2 = get_adj_r2(preds_rfe_rf, y_test, n_test, p_rfe_rf), Features = p_rfe_rf)
+
+# 8. RFE-ElasticNet
+preds_rfe_glmnet <- predict(rfe_glmnet, newdata = x_test_final)
+p_rfe_glmnet <- length(predictors(rfe_glmnet))
+model_results[["RFE-ElasticNet"]] <- c(RMSE = RMSE(preds_rfe_glmnet, y_test), AdjR2 = get_adj_r2(preds_rfe_glmnet, y_test, n_test, p_rfe_glmnet), Features = p_rfe_glmnet)
+
+# 9. RFE-AdaptiveLasso
+preds_rfe_adalasso <- predict(rfe_adalasso, newdata = x_test_final)
+p_rfe_adalasso <- length(predictors(rfe_adalasso))
+model_results[["RFE-AdaptiveLasso"]] <- c(RMSE = RMSE(preds_rfe_adalasso, y_test), AdjR2 = get_adj_r2(preds_rfe_adalasso, y_test, n_test, p_rfe_adalasso), Features = p_rfe_adalasso)
+
+```
+
+
+
+
+```{r}
+
+# --- 7. RESULTS SUMMARY AND VISUALIZATION ---
+results_df <- do.call(rbind, model_results)
+results_df <- as.data.frame(results_df)
+results_df$Model <- rownames(results_df)
+rownames(results_df) <- NULL
+results_df <- results_df
+
+# Display the final summary table
+kable(results_df,
+      caption = "Final Model Comparison on Test Data",
+      digits = 3,
+      col.names = c("Model", "Test RMSE", "Test Adj. R-squared", "# Features"))
+
+# Create the final comparison bar plot
+ggplot(results_df, aes(x = reorder(Model, RMSE), y = RMSE, fill = Model)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = round(RMSE, 3)), vjust = -0.3, size = 3.5) +
+  labs(title = "Comparison of Model Performance by Test Set RMSE",
+       x = "Model",
+       y = "Root Mean Squared Error (RMSE)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "none")
+
+
+```
+
+
+
+
+```{r}
+
+# --- 8. FEATURE SELECTION SUMMARY ---
+selected_features_list <- list()
+
+# Get predictors from models that perform selection or shrinkage
+# Note: For Ridge/Elastic-Net, all features have non-zero coefficients, so all are "selected".
+ridge_coeffs <- coef(ridge_model)
+selected_features_list[["Ridge"]] <- rownames(ridge_coeffs)[which(ridge_coeffs!= 0)][-1]
+
+lasso_coeffs <- coef(lasso_model)
+selected_features_list[["Lasso"]] <- rownames(lasso_coeffs)[which(lasso_coeffs!= 0)][-1]
+
+adalasso_coeffs <- coef(adalasso_model)
+selected_features_list[["Adaptive Lasso"]] <- rownames(adalasso_coeffs)[which(adalasso_coeffs!= 0)][-1]
+
+enet_coeffs <- coef(elastic_net_model$finalModel, elastic_net_model$bestTune$lambda)
+selected_features_list[["Elastic-Net"]] <- rownames(enet_coeffs)[which(enet_coeffs!= 0)][-1]
+
+# selected_features_list[]] <- predictors(rfe_lm_results)
+selected_features_list[['RFE-DT']] <- predictors(rfe_dt_results)
+selected_features_list[["RFE-RF"]] <- predictors(rfe_rf_results)
+selected_features_list[["RFE-ElasticNet"]] <- predictors(rfe_glmnet)
+selected_features_list[["RFE-AdaptiveLasso"]] <- predictors(rfe_adalasso)
+# selected_features_list[["RFE-SVM"]] <- predictors(rfe_svm_results)
+
+all_predictors <- colnames(x_train_final)
+
+selection_df <- sapply(selected_features_list, function(selected_vars) {
+  ifelse(all_predictors %in% selected_vars, "✔️", "❌")
+})
+
+selection_summary_df <- data.frame(Predictor = all_predictors, selection_df)
+
+# Display the final summary table using kable
+kable(selection_summary_df,
+      row.names = FALSE,
+      caption = "Summary of Predictors Selected by Each Technique")
+
+
+```
+
+
+
+```{r}
+
+# --- 9. ADVANCED VISUALIZATIONS FOR RESEARCH PAPER ---
+# SUGGESTION: The following plots provide deeper insight into model behavior,
+# making your research paper more comprehensive and self-explanatory.
+
+## --- 9A. VISUALIZATION 1: COEFFICIENT PATHS FOR PENALIZED MODELS ---
+# This plot is essential to show *how* Lasso performs selection vs. Ridge's shrinkage.
+full_ridge_model <- glmnet(x_train_matrix, y_train, alpha = 0)
+full_lasso_model <- glmnet(x_train_matrix, y_train, alpha = 1)
+
+# Prepare data for ggplot
+ridge_coefs <- as.matrix(coef(full_ridge_model))
+lasso_coefs <- as.matrix(coef(full_lasso_model))
+
+ridge_df <- as.data.frame(t(ridge_coefs[-1,])) %>%
+  mutate(lambda = full_ridge_model$lambda) %>%
+  pivot_longer(-lambda, names_to = "variable", values_to = "coefficient")
+
+lasso_df <- as.data.frame(t(lasso_coefs[-1,])) %>%
+  mutate(lambda = full_lasso_model$lambda) %>%
+  pivot_longer(-lambda, names_to = "variable", values_to = "coefficient")
+
+# Plot for Ridge
+p_ridge_path <- ggplot(ridge_df, aes(x = log(lambda), y = coefficient, color = variable)) +
+  geom_line() +
+  labs(title = "Ridge Regression Coefficient Paths",
+       x = "Log(Lambda)",
+       y = "Coefficient Value") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Plot for Lasso
+p_lasso_path <- ggplot(lasso_df, aes(x = log(lambda), y = coefficient, color = variable)) +
+  geom_line() +
+  labs(title = "Lasso Regression Coefficient Paths",
+       x = "Log(Lambda)",
+       y = "Coefficient Value") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_ridge_path)
+print(p_lasso_path)
+
+
+```
+
+
+
+```{r}
+
+## --- 9B. VISUALIZATION 2: RFE PERFORMANCE PROFILES ---
+# This plot shows the cross-validated RMSE for each subset size, justifying
+# the final number of features chosen by the RFE algorithm.
+
+# Combine results from different RFE models into one data frame
+rfe_results_all <- bind_rows(
+  mutate(rfe_dt_results$results, Model = "RFE-DT"),
+  mutate(rfe_rf_results$results, Model = "RFE-RF"),
+  mutate(rfe_glmnet$results, Model = "RFE-ElasticNet"),
+  mutate(rfe_adalasso$results, Model = "RFE-AdaptiveLasso")
+)
+
+# Find the optimal number of features for each model to highlight on the plot
+opt_features <- rfe_results_all %>%
+  group_by(Model) %>%
+  slice_min(order_by = RMSE, n = 1)
+
+# Plot the performance profiles
+p_rfe_profiles <- ggplot(rfe_results_all, aes(x = Variables, y = RMSE, color = Model, group = Model)) +
+  geom_line() +
+  geom_point() +
+  geom_point(data = opt_features, aes(x = Variables, y = RMSE), size = 4, shape = 8, stroke = 1.5) +
+  facet_wrap(~ Model, scales = "free_y") +
+  labs(title = "RFE Performance Profiles by Core Model",
+       subtitle = "Asterisk (*) indicates the optimal number of features selected",
+       x = "Number of Features",
+       y = "Cross-Validated RMSE") +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+print(p_rfe_profiles)
+
+
+
+```
+
+
+
+```{r}
+
+## --- 9C. VISUALIZATION 3: FEATURE SELECTION HEATMAP ---
+# This provides a more visually appealing and immediate summary of which
+# features were selected by which models.
+
+# Convert the summary data frame to a long format for ggplot
+selection_long_df <- selection_summary_df %>%
+  pivot_longer(-Predictor, names_to = "Model", values_to = "Selected") %>%
+  mutate(Selected_Status = ifelse(Selected == "✔️", "Selected", "Not Selected"))
+
+# Create the heatmap
+p_selection_heatmap <- ggplot(selection_long_df, aes(x = Model, y = Predictor, fill = Selected_Status)) +
+  geom_tile(color = "white", lwd = 1.5, linetype = 1) +
+  scale_fill_manual(values = c("Selected" = "darkgreen", "Not Selected" = "grey80")) +
+  labs(title = "Feature Selection Concordance Across Models",
+       x = "Model",
+       y = "Predictor",
+       fill = "Status") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p_selection_heatmap)
+
+```
+
+
+
+```{r}
+# --- 10. ADVANCED STATISTICAL VISUALIZATIONS ---
+# This section adds visualizations aimed at a more technical/statistical audience,
+# focusing on model diagnostics, stability, and interpretability.
+
+## --- 10A. COMPARATIVE RESIDUAL DIAGNOSTICS ---
+# This plot compares the residuals of key models to check for violations of
+# regression assumptions (e.g., linearity, normality, homoscedasticity).
+# A well-behaved model will have randomly scattered residuals around zero.
+print("Generating comparative residual diagnostic plots...")
+model_list_for_diag <- list(
+  "OLS" = ols_model,
+  "Lasso" = lasso_model, # Note: glmnet objects are not directly supported by ggResidpanel
+  "RFE-RF" = rfe_rf_results$fit # Use the final fitted model from the RFE object
+)
+# We will use the 'resid_auxpanel' for glmnet and RF as they are not lm objects
+# Augment data to get residuals and fitted values
+ols_augmented <- broom::augment(ols_model)
+# For Lasso
+lasso_preds <- predict(lasso_model, newx = x_train_matrix)
+lasso_augmented <- data.frame(.fitted = lasso_preds[,1],.resid = y_train - lasso_preds[,1])
+# For RFE-RF
+rf_preds <- predict(rfe_rf_results, newdata = x_train_final)
+rf_augmented <- data.frame(.fitted = rf_preds,.resid = y_train - rf_preds)
+
+# Create a combined data frame for plotting with ggplot2
+diag_data <- bind_rows(
+  mutate(ols_augmented, Model = "OLS"),
+  mutate(lasso_augmented, Model = "Lasso"),
+  mutate(rf_augmented, Model = "RFE-RF")
+)
+
+# Plot 1: Residuals vs. Fitted
+p_resid_vs_fitted <- ggplot(diag_data, aes(x =.fitted, y =.resid)) +
+  geom_point(alpha = 0.5) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+  geom_smooth(method = "loess", color = "blue", se = FALSE) +
+  facet_wrap(~Model, scales = "free") +
+  labs(title = "Residuals vs. Fitted Values by Model", x = "Fitted Values", y = "Residuals") +
+  theme_minimal()
+
+# Plot 2: Q-Q Plot of Residuals
+p_qq_residuals <- ggplot(diag_data, aes(sample =.resid)) +
+  stat_qq() +
+  stat_qq_line() +
+  facet_wrap(~Model, scales = "free") +
+  labs(title = "Normal Q-Q Plot of Residuals by Model", x = "Theoretical Quantiles", y = "Sample Quantiles") +
+  theme_minimal()
+
+print(p_resid_vs_fitted)
+print(p_qq_residuals)
+
+
+```
+```{r}
+# --- Create a Data Frame for Coefficients ---
+
+# Extract coefficients from each model object
+# The 'coef' function returns a sparse matrix, which we'll use.
+ridge_coeffs <- coef(ridge_model)
+lasso_coeffs <- coef(lasso_model)
+adalasso_coeffs <- coef(adalasso_model)
+enet_coeffs <- coef(elastic_net_model$finalModel, elastic_net_model$bestTune$lambda)
+
+# Combine the coefficients into a single data frame
+# The row names from one of the coefficient objects give us the feature names.
+coefficients_df <- data.frame(
+  Feature = rownames(ridge_coeffs),
+  Ridge = as.numeric(ridge_coeffs),
+  Lasso = as.numeric(lasso_coeffs),
+  "Adaptive Lasso" = as.numeric(adalasso_coeffs),
+  "Elastic-Net" = as.numeric(enet_coeffs),
+  check.names = FALSE # Prevents R from changing column names with spaces
+)
+
+# Use kable for a nicely formatted table suitable for a report
+knitr::kable(
+  coefficients_df,
+  digits = 4, # Round coefficients to 4 decimal places
+  caption = "Comparison of Regression Coefficients from Shrinkage Methods",
+  row.names = FALSE
+)
+
+
+```
+
+```{r}
+
+# --- Create a Comprehensive Data Frame for All Coefficients (Corrected) ---
+
+# Start with the original dataframe
+coefficients_df <- data.frame(
+  Feature = rownames(coef(ridge_model)),
+  Ridge = as.numeric(coef(ridge_model)),
+  Lasso = as.numeric(coef(lasso_model)),
+  "Adaptive Lasso" = as.numeric(coef(adalasso_model)),
+  "Elastic-Net" = as.numeric(coef(elastic_net_model$finalModel, elastic_net_model$bestTune$lambda)),
+  check.names = FALSE
+)
+
+# --- Add RFE-ElasticNet Coefficients (Corrected Line) ---
+# Initialize the column with zeros
+coefficients_df$"RFE-ElasticNet" <- 0
+# CORRECTED: Access the finalModel and bestTune from the rfe$fit object
+rfe_enet_coeffs <- coef(rfe_glmnet$fit$finalModel, s = rfe_glmnet$fit$bestTune$lambda)
+selected_features_enet <- rownames(rfe_enet_coeffs)
+coefficients_df$"RFE-ElasticNet"[match(selected_features_enet, coefficients_df$Feature)] <- as.numeric(rfe_enet_coeffs)
+
+
+# --- Add RFE-AdaptiveLasso Coefficients (Corrected Line) ---
+# Initialize the column with zeros
+coefficients_df$"RFE-AdaptiveLasso" <- 0
+# CORRECTED: Access the finalModel and bestTune from the rfe$fit object
+rfe_adalasso_coeffs <- coef(rfe_adalasso$fit$finalModel, s = rfe_adalasso$fit$bestTune$lambda)
+selected_features_adalasso <- rownames(rfe_adalasso_coeffs)
+coefficients_df$"RFE-AdaptiveLasso"[match(selected_features_adalasso, coefficients_df$Feature)] <- as.numeric(rfe_adalasso_coeffs)
+
+
+# --- Display the Final Combined Table ---
+knitr::kable(
+  coefficients_df,
+  digits = 4,
+  caption = "Comprehensive Comparison of Coefficients Across All Models",
+  row.names = FALSE
+)
+
+```
+
